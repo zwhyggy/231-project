@@ -1,0 +1,68 @@
+---
+title: "231 Project"
+author: "Yuan Zhou"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  prettydoc::html_pretty:
+    theme: vignette
+    highlight: github
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, message=FALSE, echo=FALSE}
+options(digits = 4)
+
+indent1 = '    '
+indent2 = '        '
+indent3 = '            '
+```
+
+# Introduction
+
+![](https://media.giphy.com/media/3o6gE08CvPHCg3eG2s/giphy.gif)
+
+![NBA 75 Anniversary Team.](https://library.sportingnews.com/2022-02/nba-plain--67652590-26ad-4c07-9150-2b341710a032.png)
+
+```{r, warning = FALSE, message=FALSE}
+library(tidymodels)
+library(ISLR) # For the Smarket data set
+library(ISLR2) # For the Bikeshare data set
+library(discrim)
+library(poissonreg)
+library(corrr)
+library(corrplot)
+library(naniar)
+library(klaR) # for naive bayes
+tidymodels_prefer()
+```
+
+# Import Data Set
+
+```{r, warning=FALSE, message = FALSE}
+library(readr)
+data <- read_csv("common_player_info.csv")
+df <- data[1:2000, c('height','weight','season_exp','position','school', 'country', 'draft_round','greatest_75_flag')]
+
+# Inspect missing data 
+vis_miss(df)
+df <- df %>% drop_na()
+table(df$greatest_75_flag)
+
+
+# modify the height data to convert the height data to cms 
+df$height <- 2.54*(12* as.numeric(sub("\\-.*", "", df$height)) + as.numeric(sub(".*\\-", "", df$height)))
+```
+
+# visualization
+
+```{r}
+cor_lab <- df %>% select(-greatest_75_flag) %>% correlate()
+rplot(cor_lab)
+```
+
+From the correlation plot, height and weight \# Logistic Regression
+
+```{r}
+
+```
