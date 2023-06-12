@@ -19,15 +19,14 @@ indent3 = '            '
 ```
 
 # Introduction
-
+The NBA is 
 ![](https://media.giphy.com/media/3o6gE08CvPHCg3eG2s/giphy.gif)
+<iframe width="560" height="315" src="https://www.youtube.com/embed/BJZRpcnmD5c" data-external="1"> </iframe>
 
 ![NBA 75 Anniversary Team.](https://library.sportingnews.com/2022-02/nba-plain--67652590-26ad-4c07-9150-2b341710a032.png)
 
-```{r, warning = FALSE, message=FALSE}
+```{r, warning = FALSE, message=FALSE, echo=FALSE}
 library(tidymodels)
-library(ISLR) # For the Smarket data set
-library(ISLR2) # For the Bikeshare data set
 library(discrim)
 library(poissonreg)
 library(corrr)
@@ -35,14 +34,20 @@ library(corrplot)
 library(naniar)
 library(klaR) # for naive bayes
 tidymodels_prefer()
+library(themis)
+library(vip)
+library(xgboost)
+set.seed(2)
+tidymodels_prefer()
 ```
 
-# Import Data Set
+# Initital Data Processing 
 
 ```{r, warning=FALSE, message = FALSE}
 library(readr)
 data <- read_csv("common_player_info.csv")
-df <- data[1:2000, c('height','weight','season_exp','position','school', 'country', 'draft_round','greatest_75_flag')]
+df <- data[1:3000, c('height','weight','season_exp','position','school', 'country', 'draft_round','greatest_75_flag')]
+
 
 # Inspect missing data 
 vis_miss(df)
@@ -52,6 +57,74 @@ table(df$greatest_75_flag)
 
 # modify the height data to convert the height data to cms 
 df$height <- 2.54*(12* as.numeric(sub("\\-.*", "", df$height)) + as.numeric(sub(".*\\-", "", df$height)))
+
+# modify the position data 
+# coded each position into a number from 1 to 5
+for ( x in 1:nrow(df)) {
+  if(df$position[x] == "Forward")
+    df$position[x] = 3
+  else if (df$position[x] == "Guard" || df$position[x] == "Guard-Forward")
+    df$position[x] = 1
+  else if (df$position[x] == "Center")
+    df$position[x] = 5
+  else if (df$position[x] == "Forward-Guard")
+    df$position[x] = 2
+  else if (df$position[x] == "Forward-Center" || df$position[x] == "Center-Forward")
+    df$position[x] = 4
+}
+
+# modify the country data 
+for ( x in 1:nrow(df)) {
+  if(df$country[x] != "USA")
+    df$country[x] = "International"
+}
+
+# modify draftig data 
+for ( x in 1:nrow(df)) {
+  if(df$draft_round[x] == "Undrafted")
+    df$draft_round[x] = 0
+}
+
+# modify draft round data. 
+
+df$draft_round <- as.numeric(df$draft_round )
+
+for ( x in 1:nrow(df)) {
+  if(df$draft_round[x] > 2)
+    df$draft_round[x] = 0
+}
+
+```
+
+Note on how the data is modified. 
+
+# Split the data into training and testing sets
+```{r}
+set.seed(2)
+df_split <- initial_split(df, strata = greatest_75_flag, prop = 0.7) 
+df_split
+
+nba_train <- training(df_split)
+nba_test <- testing(df_split)
+table(nba_train$greatest_75_flag)
+table(nba_test$greatest_75_flag)
+```
+
+
+```{r}
+# draft round, country and position are all factor variables 
+
+df$greatest_75_flag <- factor(df$greatest_75_flag, levels = c("N", "Y"))
+
+nba_train$greatest_75_flag <- as.factor(nba_train$greatest_75_flag)
+nba_test$greatest_75_flag <- as.factor(nba_test$greatest_75_flag)
+
+
+df<-df %>% mutate(draft_round = factor(draft_round), country = factor(country), position = factor(position), greatest_75_flag = factor(greatest_75_flag))
+
+df
+df %>% 
+  ggplot(aes(x = greatest_75_flag)) + geom_bar()
 ```
 
 # visualization
@@ -60,9 +133,292 @@ df$height <- 2.54*(12* as.numeric(sub("\\-.*", "", df$height)) + as.numeric(sub(
 cor_lab <- df %>% select(-greatest_75_flag) %>% correlate()
 rplot(cor_lab)
 ```
+From the correlation plot, height and weight are postively correlated with a strong correlation.
 
-From the correlation plot, height and weight \# Logistic Regression
+# Define recipe. CVV
 
 ```{r}
+# Recipe
+nba_recipe <- recipe (greatest_75_flag ~ height + weight + season_exp + position + country + draft_round, data = nba_train) %>% 
+  step_dummy(position) %>%
+  step_dummy(country) %>%
+  step_upsample(greatest_75_flag, over_ratio = 1, skip = TRUE)
+
+prep(nba_recipe) %>% bake(new_data = nba_train) %>%
+  group_by(greatest_75_flag)
+
+# Define folds for CVV, 5folds CV
+nba_folds <- vfold_cv(nba_train, v = 10)
+```
+
+# Logistic Regression
+
+```{r}
+# glm engine 
+log_model <- logistic_reg() %>%
+  set_engine("glm") %>% 
+  set_mode("classification") 
+
+log_wf <- workflow() %>% 
+  add_model(log_model) %>% 
+  add_recipe(nba_recipe)
+
+# Fit the model for each fold
+tune_res_log <- tune_grid(
+  object = log_wf,
+  resamples = nba_folds
+)
+
+# Select the best model from Logistic Regression
+collect_metrics(tune_res_log)
+show_best(tune_res_log, metric = "roc_auc")
+
+# Final fit for Logistic Regression. 
+log_fit <- fit(log_wf, nba_train)
+```
+# KNN
+```{r}
+library(kknn)
+set.seed(2)
+knn_model <- nearest_neighbor(neighbors = tune()) %>% # neighbors as tuning parameter
+  set_engine("kknn") %>% 
+  set_mode("classification") 
+
+knn_wf <- workflow() %>%
+  add_model(knn_model) %>%
+  add_recipe(nba_recipe)
+
+# Define neighbors grid
+neighbors_grid <- grid_regular(neighbors(range = c(1, 20)), levels = 20)
+
+# Fit the model for each fold
+tune_res_knn <- tune_grid(
+  object = knn_wf, 
+  resamples = nba_folds, 
+  grid = neighbors_grid
+)
+
+best_neighbors <- select_by_one_std_err(tune_res_knn, metric = "roc_auc", neighbors)
+# Final fit for KNN. 
+knn_final_wf <- finalize_workflow(knn_wf, best_neighbors)
+knn_final_fit <- fit(knn_final_wf, nba_train)
+```
+# Enlastic Net Regression
+```{r}
+set.seed(2)
+# Define the ENR model/ Set up tuning parameters
+enr_model <- logistic_reg(mixture = tune(), 
+                              penalty = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("glmnet")
+
+enr_wf <- workflow() %>%
+  add_recipe(nba_recipe) %>%
+  add_model(enr_model)
+
+enr_grid <- grid_regular(penalty(range = c(0, 1),
+                                     trans = identity_trans()),
+                        mixture(range = c(0, 1)),
+                             levels = 10)
+
+# Fit the ENR models 
+tune_res_enr <-  tune_grid(
+  object = enr_wf,
+  resamples = nba_folds,
+  grid = enr_grid)
+
+# Select the best parameters.
+collect_metrics(tune_res_enr)
+show_best(tune_res_enr, metric = "roc_auc")
+best_enr <- select_by_one_std_err(tune_res_enr, penalty,mixture, metric = "roc_auc")
+
+# Finalize the fit for ENR
+enr_final_wf <- finalize_workflow(enr_wf, best_enr)
+enr_final_fit <- fit(enr_final_wf, nba_train)
+```
+
+# Predictions 
+```{r}
+# Logistic Predictions and Confusion matrix/ AUC/ AUC plot
+log_predictions <- predict(log_fit, nba_test)
+
+augment(log_fit,new_data = nba_test) %>% 
+ conf_mat(greatest_75_flag, .pred_class)
+
+augment(log_fit, new_data = nba_test) %>% roc_auc(greatest_75_flag, .pred_Y)
+
+augment(log_fit, new_data = nba_test) %>%
+  roc_curve(greatest_75_flag, .pred_N) %>%
+  autoplot()
+
+
+# Knn Predictions and Confusion matrix/ AUC/ AUC plot
+knn_predictions <- predict(knn_final_fit, nba_test)
+
+augment(knn_final_fit,new_data = nba_test) %>% 
+ conf_mat(greatest_75_flag, .pred_class)
+
+augment(knn_final_fit, new_data = nba_test) %>% roc_auc(greatest_75_flag, .pred_Y)
+
+augment(knn_final_fit, new_data = nba_test) %>%
+  roc_curve(greatest_75_flag, .pred_N) %>%
+  autoplot()
+
+# ENR Predictions and Confusion matrix/ AUC/ AUC plot
+
+enr_predictions <- predict(enr_final_fit, nba_test)
+
+augment(enr_final_fit,new_data = nba_test) %>% 
+ conf_mat(greatest_75_flag, .pred_class) 
+
+augment(enr_final_fit, new_data = nba_test) %>% roc_auc(greatest_75_flag, .pred_Y)
+
+augment(enr_final_fit, new_data = nba_test) %>%
+  roc_curve(greatest_75_flag, .pred_N) %>%
+  autoplot()
+```
+
+# Random Forrest Approach and Predictions. 
+```{r}
+forrest_model <- rand_forest(mtry = tune(), trees = tune(), min_n = tune()) %>%
+  set_engine("ranger",  importance = "impurity") %>% 
+  set_mode("classification") %>% 
+  translate()
+
+tree_grid <- grid_regular(mtry(range = c(1, 6)),levels = 6,
+                        trees(range = c(400, 1800)),
+                        min_n(range = c(10, 20)))
+
+# Set up the work flow of random Forrest
+tree_wf <- workflow() %>% 
+  add_model(forrest_model) %>%
+  add_recipe(nba_recipe)
+```
+
+
+```{r, eval=FALSE}
+tune_tree <- tune_grid(
+  object = tree_wf,
+  resamples = nba_folds,
+  grid = tree_grid
+)
+
+save(tune_tree, file = "nba_tune_tree.rda")
 
 ```
+
+
+```{r}
+load("nba_tune_tree.rda")
+autoplot(tune_tree)
+
+collect_metrics(tune_tree)
+
+# select best parameters for random forrest
+best_tree  <- select_best(tune_tree)
+best_tree
+```
+
+```{r}
+# Finalize the wf 
+final_rf_model <- finalize_workflow(tree_wf,best_tree)
+final_rf_model <- fit(final_rf_model, nba_train)
+final_rf_model %>% extract_fit_parsnip() %>% 
+  vip() +
+  theme_minimal()
+# Examine model performance
+final_rf_model_test <- augment(final_rf_model, 
+                               nba_test)
+final_rf_model_test %>% 
+  roc_curve(greatest_75_flag, .pred_N) %>% 
+  autoplot()
+final_rf_model_test %>% 
+  roc_auc(greatest_75_flag, .pred_N)
+
+conf_mat(final_rf_model_test, truth = greatest_75_flag, .pred_class)%>%
+  autoplot(type = "heatmap")
+
+conf_mat(final_rf_model_test, truth = greatest_75_flag, .pred_class)
+```
+
+```{r}
+final_rf_model_test %>% 
+  roc_curve(greatest_75_flag, .pred_Y)
+
+final_rf_model_test %>% 
+  select(.pred_Y, greatest_75_flag)
+
+
+augment(final_rf_model, new_data = nba_test) %>% 
+  mutate(.pred_class = factor(if_else(.pred_Y < 0.04, "N", "Y"), levels = c("N", "Y"))) %>%
+  conf_mat(truth = greatest_75_flag, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap")
+
+
+augment(final_rf_model, new_data = nba_test) %>% 
+  mutate(.pred_class = factor(if_else(.pred_Y < 0.04, "N", "Y"), levels = c("N", "Y"))) %>% roc_auc(greatest_75_flag, .pred_N)
+
+```
+# Boosted Tree Model
+
+```{r}
+bt_model <- boost_tree(mtry = tune(), trees = tune(), min_n = tune()) %>%
+  set_engine("xgboost") %>% 
+  set_mode("classification") %>% 
+  translate()
+
+bt_grid <- grid_regular(mtry(range = c(1, 6)),levels = 6,
+                        trees(range = c(400, 1800)),
+                        min_n(range = c(10, 20)))
+
+# Set up the work flow of random Forrest
+bt_wf <- workflow() %>% 
+  add_model(bt_model) %>%
+  add_recipe(nba_recipe)
+```
+
+
+```{r, eval=FALSE}
+tune_bt <- tune_grid(
+  bt_wf,
+  resamples = nba_folds,
+  grid = bt_grid
+)
+save(tune_bt, file = "nba_tune_bt.rda")
+```
+
+
+```{r, warning=FALSE}
+load("nba_tune_bt.rda")
+autoplot(tune_bt) + theme_minimal()
+best_bt <- select_best(tune_bt)
+```
+
+```{r}
+# Finalize the boosted tree wf 
+final_bt_model <- finalize_workflow(bt_wf,best_bt)
+final_bt_model <- fit(final_bt_model, nba_train)
+final_bt_model_test <- augment(final_bt_model, 
+                               nba_test)
+
+# Access Model Performance 
+final_bt_model_test %>% 
+  roc_curve(greatest_75_flag, .pred_Y)
+
+# ROC curve
+final_bt_model_test %>% 
+  roc_curve(greatest_75_flag, .pred_N) %>% 
+  autoplot()
+
+# Heat Map 
+augment(final_bt_model, new_data = nba_test) %>% 
+  mutate(.pred_class = factor(if_else(.pred_Y < 0.04, "N", "Y"), levels = c("N", "Y"))) %>%
+  conf_mat(truth = greatest_75_flag, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap")
+
+# AUC 
+augment(final_bt_model, new_data = nba_test) %>% 
+  mutate(.pred_class = factor(if_else(.pred_Y < 0.04, "N", "Y"), levels = c("N", "Y"))) %>% roc_auc(greatest_75_flag, .pred_N)
+```
+
+# Conclusion 
